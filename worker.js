@@ -72,20 +72,22 @@ export default {
         const html = `<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <title>${city_th} - พยากรณ์อากาศ</title>
     <style>
-      *{box-sizing:border-box}body{font-family:system-ui,sans-serif;background:#f0f8ff;margin:0;padding:20px}
-     .card{background:white;border-radius:20px;padding:20px;max-width:600px;margin:0 auto;box-shadow:0 4px 12px rgba(0,0,0,0.1)}
-     .top{display:flex;align-items:center;gap:16px}.temp{font-size:56px;font-weight:800}
-     .alert{padding:14px;border-radius:12px;margin:14px 0;font-weight:700;text-align:center}
-     .rain{background:#fff176;border:1px solid #f9a825}.norain{background:#c8e6c9;border:1px solid #81c784}
-     .chart{margin-top:20px}.bar-row{display:flex;align-items:end;gap:4px;height:120px}
-     .bar-col{flex:1;min-width:28px;display:flex;flex-direction:column;align-items:center}
-     .bar{background:#42a5f5;border-radius:6px 6px 0 0;width:100%}
-    </style></head><body>
+  *{box-sizing:border-box}body{font-family:system-ui,sans-serif;background:#f0f8ff;margin:0;padding:20px}
+  .card{background:white;border-radius:20px;padding:20px;max-width:700px;margin:0 auto;box-shadow:0 4px 12px rgba(0,0,0,0.1);overflow:hidden}
+  .top{display:flex;align-items:center;gap:16px}.temp{font-size:56px;font-weight:800}
+  .alert{padding:14px;border-radius:12px;margin:14px 0;font-weight:700;text-align:center}
+  .rain{background:#fff176;border:1px solid #f9a825}.norain{background:#c8e6c9;border:1px solid #81c784}
+  .chart{margin-top:20px;overflow:hidden}
+  .bar-row{display:flex;align-items:end;gap:6px;height:140px;overflow-x:auto;padding-bottom:8px;scrollbar-width:thin}
+  .bar-col{flex:0 0 32px;display:flex;flex-direction:column;align-items:center;justify-content:end;gap:4px}
+  .bar{background:linear-gradient(#42a5f5,#1976d2);border-radius:6px 6px 0 0;width:100%;min-height:4px;transition:height 0.3s}
+  .bar-col small{font-size:11px;white-space:nowrap}
+</style></head><body>
     <div class="card">
       <div class="top"><div class="temp">${data.current.temp_c}°C</div><div><b>${city_th}</b><br>${data.current.condition.text}<br>รู้สึกเหมือน ${data.current.feelslike_c}°C</div></div>
       <div class="alert ${hours.some(h => h.chance_of_rain > 50) ? 'rain' : 'norain'}">${hours.some(h => h.chance_of_rain > 50) ? 'วันนี้มีโอกาสฝนตก' : 'วันนี้อากาศดี ไม่มีฝน'}</div>
       <div class="chart"><b>24 ชั่วโมงข้างหน้า</b><div class="bar-row">
-        ${hours.map(h => `<div class="bar-col"><div class="bar" style="height:${h.chance_of_rain}%"></div><small>${new Date(h.time).getHours()}น</small></div>`).join('')}
+        ${hours.map(h => `<div class="bar-col"><div class="bar" style="height:${Math.max(4, h.chance_of_rain)}%"></div><small>${h.chance_of_rain}%</small><small>${new Date(h.time).getHours()}น</small></div>`).join('')}
       </div></div>
       <p style="text-align:center;margin-top:20px"><a href="?json">ดู JSON</a> | <a href="?refresh">Refresh ข้อมูล</a></p>
     </div></body></html>`;
