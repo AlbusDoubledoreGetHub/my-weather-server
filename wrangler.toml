@@ -1,0 +1,10 @@
+name = "my-weather-server"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+# ถ้ามี KEY อะไรใส่ตรงนี้ได้ แต่ตอนนี้ปล่อยไว้ก่อน
+
+[[kv_namespaces]]
+binding = "WEATHER_KV"
+id = "d4ccc35369c6418493386261ea3e1701"
