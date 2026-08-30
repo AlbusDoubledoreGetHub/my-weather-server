@@ -48,6 +48,14 @@ export default {
             return Response.json(data, { headers: { "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=600" } });
         }
 
+        //const hours = data.forecast[0].hour.slice(0, 24);
+        // เดิมที่พัง
+        // const hours = data.forecast[0].hour.slice(0, 24);
+
+        // แบบใหม่กันพัง
+        if (!data.forecast || !data.forecast[0] || !data.forecast[0].hour) {
+            return Response.json({ error: "ไม่มีข้อมูล forecast", data: data }, { status: 500, headers: { "Access-Control-Allow-Origin": "*" } });
+        }
         const hours = data.forecast[0].hour.slice(0, 24);
         const html = `<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <title>${data.city_th} - พยากรณ์อากาศ</title>
