@@ -4,7 +4,7 @@ compatibility_date = "2024-11-01"
 
 # KV สำหรับ Cache 50 เขต
 kv_namespaces = [
-  { binding = "WEATHER_KV", id = "YOUR_KV_ID_HERE" }
+  { binding = "WEATHER_KV", id = "d4ccc35369c6418493386261ea3e1701E" }
 ]
 
 # Cron ทุก 30 นาที - วอร์ม 50 เขต 3 วัน
