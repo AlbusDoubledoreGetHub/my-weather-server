@@ -1,109 +1,181 @@
-// v4 Final - weatherapi.com - แก้โครงสร้าง forecast ให้ถูกต้อง
-const CITIES = [
-    { id: "latkrabang", q: "13.7226,100.7594", th: "ลาดกระบัง" },
-    { id: "bangkok", q: "13.7563,100.5018", th: "กรุงเทพกลาง" },
-    { id: "chiangmai", q: "18.7883,98.9853", th: "เชียงใหม่" },
-    { id: "phuket", q: "7.8804,98.3923", th: "ภูเก็ต" },
-];
+import { DISTRICTS } from "./districts.js";
 
-async function fetchWeather(city, apiKey) {
-    const url = `https://api.weatherapi.com/v1/forecast.json?key=${apiKey}&q=${city.q}&days=1&aqi=no&alerts=no&lang=th`;
-    const res = await fetch(url);
-    if (!res.ok) {
-        throw new Error(`API Error ${city.id}: ${res.status} ${await res.text()}`);
+const CACHE_TTL = 1800; // 30 นาที
+const API_DAYS = 3;
+
+function jsonResponse(data, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, X-API-KEY",
+      ...extraHeaders
     }
-    const data = await res.json();
-    return data;
+  });
+}
+
+function unauthorized() {
+  return jsonResponse({ error: "Unauthorized", message: "Missing or invalid X-API-KEY" }, 401);
+}
+
+function checkApiKey(request, env) {
+  // ถ้ายังไม่ได้ตั้ง MOBILE_API_KEY ใน Dashboard ให้ผ่านก่อน (dev mode)
+  if (!env.MOBILE_API_KEY) return true;
+  const key = request.headers.get("X-API-KEY") || request.headers.get("x-api-key") || new URL(request.url).searchParams.get("key");
+  return key === env.MOBILE_API_KEY;
+}
+
+async function fetchFromWeatherAPI(district, env) {
+  const url = `https://api.weatherapi.com/v1/forecast.json?key=${env.WEATHER_API_KEY}&q=${district.lat},${district.lon}&days=${API_DAYS}&aqi=no&alerts=no&lang=th`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`WeatherAPI error ${res.status}: ${text}`);
+  }
+  const data = await res.json();
+  
+  // แปลงให้เบาและตรงที่แอพต้องการ
+  const simplified = {
+    district_id: district.id,
+    district_name: district.name,
+    district_name_en: district.name_en,
+    lat: district.lat,
+    lon: district.lon,
+    updated_at: new Date().toISOString(),
+    current: {
+      temp_c: data.current.temp_c,
+      feelslike_c: data.current.feelslike_c,
+      humidity: data.current.humidity,
+      condition: data.current.condition.text,
+      icon: data.current.condition.icon,
+      wind_kph: data.current.wind_kph,
+      chance_of_rain: data.forecast.forecastday[0].hour[new Date().getHours()]?.chance_of_rain ?? data.forecast.forecastday[0].day.daily_chance_of_rain
+    },
+    forecast: data.forecast.forecastday.map(fd => ({
+      date: fd.date,
+      maxtemp_c: fd.day.maxtemp_c,
+      mintemp_c: fd.day.mintemp_c,
+      daily_chance_of_rain: fd.day.daily_chance_of_rain,
+      condition: fd.day.condition.text,
+      hourly: fd.hour.map(h => ({
+        time: h.time.split(" ")[1], // "14:00"
+        temp_c: h.temp_c,
+        chance_of_rain: h.chance_of_rain,
+        condition: h.condition.text
+      }))
+    }))
+  };
+  return simplified;
+}
+
+async function getDistrictWeather(districtId, env, forceRefresh = false) {
+  const district = DISTRICTS.find(d => d.id === districtId);
+  if (!district) return null;
+  
+  const kvKey = `weather:bangkok:${districtId}:3d`;
+  
+  if (!forceRefresh) {
+    const cached = await env.WEATHER_KV.get(kvKey, { type: "json" });
+    if (cached) return cached;
+  }
+  
+  const fresh = await fetchFromWeatherAPI(district, env);
+  await env.WEATHER_KV.put(kvKey, JSON.stringify(fresh), { expirationTtl: CACHE_TTL });
+  return fresh;
 }
 
 export default {
-    async fetch(request, env, ctx) {
-        const url = new URL(request.url);
-        const apiKey = env.WEATHER_API_KEY;
-
-        // ถ้าเรียก?refresh จะไปดึง API ใหม่และเก็บลง KV
-        if (url.searchParams.has("refresh")) {
-            if (!apiKey) return Response.json({ error: "ไม่มี WEATHER_API_KEY ใน env" }, { status: 500 });
-            if (!env.WEATHER_KV) return Response.json({ error: "ไม่มี KV binding WEATHER_KV" }, { status: 500 });
-
-            try {
-                const results = await Promise.all(CITIES.map(c => fetchWeather(c, apiKey)));
-                // เก็บลง KV
-                for (let i = 0; i < CITIES.length; i++) {
-                    await env.WEATHER_KV.put(CITIES[i].id, JSON.stringify(results[i]));
-                }
-                return Response.json({ ok: true, message: "Refresh สำเร็จ", cities: CITIES.map(c => c.th) });
-            } catch (e) {
-                return Response.json({ error: e.message }, { status: 500 });
-            }
-        }
-
-        // อ่านข้อมูลหลัก = ลาดกระบัง
-        let data = null;
-        if (env.WEATHER_KV) {
-            const cached = await env.WEATHER_KV.get("latkrabang");
-            if (cached) data = JSON.parse(cached);
-        }
-
-        // ถ้าไม่มีใน KV ให้ดึงสดเลย (กรณีเพิ่ง deploy)
-        if (!data) {
-            if (!apiKey) return new Response("ยังไม่มีข้อมูลใน KV กรุณาเรียก?refresh&key=... ก่อน และต้องตั้ง WEATHER_API_KEY", { status: 500 });
-            try {
-                data = await fetchWeather(CITIES[0], apiKey);
-            } catch (e) {
-                return Response.json({ error: e.message, hint: "เช็ค API KEY, โควต้า, หรือเรียก?refresh" }, { status: 500 });
-            }
-        }
-
-        // === จุดที่เคยแตก บรรทัด 47 ของคุณ แก้แล้วตรงนี้ ===
-        const accept = request.headers.get("Accept") || "";
-        if (accept.includes("application/json") || url.searchParams.has("json")) {
-            return Response.json(data, { headers: { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json; charset=utf-8" } });
-        }
-
-        // กันแตก 100% - เช็คโครงสร้างใหม่ที่ถูกต้องของ weatherapi
-        if (!data.forecast || !data.forecast.forecastday || !data.forecast.forecastday[0]) {
-            return Response.json({ error: "โครงสร้าง forecast ไม่ถูกต้อง", data_preview: data }, { status: 500 });
-        }
-
-        const hours = data.forecast.forecastday[0].hour.slice(0, 24);
-        const city_th = CITIES.find(c => c.id === "latkrabang")?.th || data.location.name;
-
-        const html = `<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>${city_th} - พยากรณ์อากาศ</title>
-    <style>
-  *{box-sizing:border-box}body{font-family:system-ui,sans-serif;background:#f0f8ff;margin:0;padding:20px}
-  .card{background:white;border-radius:20px;padding:20px;max-width:700px;margin:0 auto;box-shadow:0 4px 12px rgba(0,0,0,0.1);overflow:hidden}
-  .top{display:flex;align-items:center;gap:16px}.temp{font-size:56px;font-weight:800}
-  .alert{padding:14px;border-radius:12px;margin:14px 0;font-weight:700;text-align:center}
-  .rain{background:#fff176;border:1px solid #f9a825}.norain{background:#c8e6c9;border:1px solid #81c784}
-  .chart{margin-top:20px;overflow:hidden}
-  .bar-row{display:flex;align-items:end;gap:6px;height:140px;overflow-x:auto;padding-bottom:8px;scrollbar-width:thin}
-  .bar-col{flex:0 0 32px;display:flex;flex-direction:column;align-items:center;justify-content:end;gap:4px}
-  .bar{background:linear-gradient(#42a5f5,#1976d2);border-radius:6px 6px 0 0;width:100%;min-height:4px;transition:height 0.3s}
-  .bar-col small{font-size:11px;white-space:nowrap}
-</style></head><body>
-    <div class="card">
-      <div class="top"><div class="temp">${data.current.temp_c}°C</div><div><b>${city_th}</b><br>${data.current.condition.text}<br>รู้สึกเหมือน ${data.current.feelslike_c}°C</div></div>
-      <div class="alert ${hours.some(h => h.chance_of_rain > 50) ? 'rain' : 'norain'}">${hours.some(h => h.chance_of_rain > 50) ? 'วันนี้มีโอกาสฝนตก' : 'วันนี้อากาศดี ไม่มีฝน'}</div>
-      <div class="chart"><b>24 ชั่วโมงข้างหน้า</b><div class="bar-row">
-        ${hours.map(h => `<div class="bar-col"><div class="bar" style="height:${Math.max(4, h.chance_of_rain)}%"></div><small>${h.chance_of_rain}%</small><small>${new Date(h.time).getHours()}น</small></div>`).join('')}
-      </div></div>
-      <p style="text-align:center;margin-top:20px"><a href="?json">ดู JSON</a> | <a href="?refresh">Refresh ข้อมูล</a></p>
-    </div></body></html>`;
-
-        return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
-    },
-
-    // Cron ดึงทุกชั่วโมง
-    async scheduled(event, env, ctx) {
-        const apiKey = env.WEATHER_API_KEY;
-        if (!apiKey || !env.WEATHER_KV) return;
-        ctx.waitUntil((async () => {
-            const results = await Promise.all(CITIES.map(c => fetchWeather(c, apiKey)));
-            for (let i = 0; i < CITIES.length; i++) {
-                await env.WEATHER_KV.put(CITIES[i].id, JSON.stringify(results[i]));
-            }
-        })());
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    
+    if (request.method === "OPTIONS") {
+      return jsonResponse({}, 200);
     }
+
+    // Public health check - ไม่ต้องใช้ API Key
+    if (url.pathname === "/" || url.pathname === "/api") {
+      return jsonResponse({ 
+        status: "ok", 
+        version: "5.0", 
+        project: "Bangkok 50 Districts Proxy",
+        endpoints: ["/api/districts", "/api/weather?district=lat_krabang", "/api/bangkok/all?days=3"],
+        cache: "30m", forecast_days: 3, total_districts: DISTRICTS.length
+      });
+    }
+
+    if (url.pathname === "/api/districts") {
+      // อันนี้ให้ดูได้โดยไม่ต้องใช้ key ก็ได้ หรือจะล็อคก็ได้ - ตอนนี้เปิดไว้
+      return jsonResponse({ count: DISTRICTS.length, districts: DISTRICTS });
+    }
+
+    // ตั้งแต่นี้ต้องเช็ค X-API-KEY
+    if (!checkApiKey(request, env)) {
+      return unauthorized();
+    }
+
+    try {
+      if (url.pathname === "/api/weather") {
+        const districtId = url.searchParams.get("district") || "lat_krabang";
+        const data = await getDistrictWeather(districtId, env);
+        if (!data) return jsonResponse({ error: "District not found" }, 404);
+        return jsonResponse(data);
+      }
+
+      if (url.pathname === "/api/bangkok/all") {
+        const allData = [];
+        for (const d of DISTRICTS) {
+          const kvKey = `weather:bangkok:${d.id}:3d`;
+          const cached = await env.WEATHER_KV.get(kvKey, { type: "json" });
+          if (cached) {
+            allData.push(cached);
+          } else {
+            // ถ้าไม่มี cache ให้ fetch แบบขนาน แต่จำกัดเพื่อไม่ให้เกิน rate limit
+            allData.push({ district_id: d.id, error: "not cached yet, will be available after next cron" });
+          }
+        }
+        return jsonResponse({ 
+          updated_at: new Date().toISOString(),
+          count: allData.length,
+          forecast_days: 3,
+          data: allData 
+        });
+      }
+
+      if (url.pathname === "/api/raw") {
+        // สำหรับยิง lat/lon ตรงๆจาก GPS มือถือ
+        const lat = url.searchParams.get("lat");
+        const lon = url.searchParams.get("lon");
+        if (!lat || !lon) return jsonResponse({ error: "lat, lon required" }, 400);
+        const tempDistrict = { id: "custom", name: "Custom", name_en: "Custom", lat: parseFloat(lat), lon: parseFloat(lon) };
+        const kvKey = `weather:custom:${lat},${lon}:3d`;
+        const cached = await env.WEATHER_KV.get(kvKey, { type: "json" });
+        if (cached) return jsonResponse(cached);
+        const fresh = await fetchFromWeatherAPI(tempDistrict, env);
+        await env.WEATHER_KV.put(kvKey, JSON.stringify(fresh), { expirationTtl: CACHE_TTL });
+        return jsonResponse(fresh);
+      }
+
+      return jsonResponse({ error: "Not found" }, 404);
+
+    } catch (e) {
+      return jsonResponse({ error: e.message }, 500);
+    }
+  },
+
+  async scheduled(event, env, ctx) {
+    // Cron ทุก 30 นาที - ไล่วอร์ม 50 เขต
+    ctx.waitUntil((async () => {
+      for (const district of DISTRICTS) {
+        try {
+          await getDistrictWeather(district.id, env, true); // forceRefresh = true
+          // เว้น 1 วินาที กันโดน WeatherAPI rate limit
+          await new Promise(r => setTimeout(r, 1000));
+        } catch (err) {
+          console.log(`Failed ${district.id}: ${err.message}`);
+        }
+      }
+    })());
+  }
 };

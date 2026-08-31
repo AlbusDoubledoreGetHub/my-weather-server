@@ -1,0 +1,12 @@
+name = "weatherapi"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+# KV สำหรับ Cache 50 เขต
+kv_namespaces = [
+  { binding = "WEATHER_KV", id = "YOUR_KV_ID_HERE" }
+]
+
+# Cron ทุก 30 นาที - วอร์ม 50 เขต 3 วัน
+[triggers]
+crons = ["*/30 * * * *"]
