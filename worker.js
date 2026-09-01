@@ -1,29 +1,33 @@
 /**
- * Weather Bangkok v5.2 - Dynamic District Filter (weatherapi.com edition) FINAL
- * - แก้ import ให้ตรงกับ export const DISTRICTS
- * - รองรับ name / name_th ทั้งคู่
- * - มี MOBILE KEY scorpion
- * - มี /api/refresh ให้กดเติม KV เอง
+ * Weather Bangkok v5.3 - FIX total 0 issue
+ * - import { DISTRICTS } แบบถูกต้อง
+ * - ถ้า weatherapi ล้มบางเขต จะไม่ล้มทั้ง 50
+ * - log error ชัดเจน
  */
 
 import { DISTRICTS } from './districts.js';
 
-export default {
-  // 1. Cron ทุก 30 นาที - ไปยิง weatherapi.com 50 เขต แล้วเก็บก้อนเดียว
-  async scheduled(event, env, ctx) {
-    try {
-      const apiKey = env.WEATHERAPI_KEY;
-      if (!apiKey) throw new Error("Missing WEATHERAPI_KEY");
-
-      const results = await Promise.all(
-        DISTRICTS.map(async (d) => {
+async function fetchAllWeather(apiKey) {
+  const results = [];
+  let failed = 0;
+  
+  // ยิงทีละ 10 เขต ไม่ยิงพร้อมกัน 50 ทีเดียว เดี๋ยวโดน rate limit
+  for (let i = 0; i < DISTRICTS.length; i += 10) {
+    const chunk = DISTRICTS.slice(i, i + 10);
+    const chunkResults = await Promise.all(
+      chunk.map(async (d) => {
+        try {
           const url = `https://api.weatherapi.com/v1/forecast.json?key=${apiKey}&q=${d.lat},${d.lon}&days=7&aqi=no&alerts=no`;
           const res = await fetch(url);
-          if (!res.ok) throw new Error(`Failed ${d.id}: ${res.status}`);
+          if (!res.ok) {
+            console.error(`Failed ${d.id}: ${res.status} ${await res.text()}`);
+            failed++;
+            return null;
+          }
           const json = await res.json();
           return {
             id: d.id,
-            name_th: d.name_th || d.name, // รองรับทั้ง name_th และ name
+            name_th: d.name_th || d.name,
             name_en: d.name_en,
             lat: d.lat,
             lon: d.lon,
@@ -32,13 +36,39 @@ export default {
             location: json.location,
             updated_at: new Date().toISOString()
           };
-        })
-      );
+        } catch (err) {
+          console.error(`Error ${d.id}:`, err.message);
+          failed++;
+          return null;
+        }
+      })
+    );
+    results.push(...chunkResults.filter(Boolean));
+  }
+  
+  return { results, failed, total: DISTRICTS.length };
+}
+
+export default {
+  async scheduled(event, env, ctx) {
+    try {
+      const apiKey = env.WEATHERAPI_KEY || env.WEATHER_API_KEY;
+      if (!apiKey) throw new Error("Missing WEATHERAPI_KEY or WEATHER_API_KEY");
+
+      console.log(`Starting fetch for ${DISTRICTS.length} districts`);
+      const { results, failed, total } = await fetchAllWeather(apiKey);
+      
+      console.log(`Fetched ${results.length}/${total} success, ${failed} failed`);
+
+      if (results.length === 0) {
+        throw new Error(`All districts failed. Check WEATHER_API_KEY valid? Failed=${failed}`);
+      }
 
       const payload = {
         status: "ok",
-        version: "5.2-dynamic-filter-final",
+        version: "5.3-fixed",
         total_districts: results.length,
+        failed: failed,
         updated_at: new Date().toISOString(),
         data: results
       };
@@ -47,17 +77,16 @@ export default {
       console.log(`Saved ${results.length} districts to KV`);
 
     } catch (e) {
-      console.error("Cron error:", e);
+      console.error("Cron error:", e.message, e.stack);
+      // ไม่ throw ต่อ เพื่อไม่ให้ Cron retry รัวๆ
     }
   },
 
-  // 2. API สำหรับมือถือ
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const cache = caches.default;
     const cacheKey = new Request(url.toString(), request);
     
-    // CORS สำหรับ Flutter
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, OPTIONS",
@@ -69,7 +98,7 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // --- เช็ค MOBILE KEY (ถ้าตั้ง Secret MOBILE_API_KEY ไว้ใน Cloudflare) ---
+    // เช็ค MOBILE KEY
     if (url.pathname.startsWith("/api/")) {
       const mobileKeySecret = env.MOBILE_API_KEY;
       if (mobileKeySecret) {
@@ -81,34 +110,59 @@ export default {
     }
 
     try {
-      // --- ROUTE 0: GET /api/refresh -> สั่งให้เติม KV ทันที ไม่ต้องรอ Cron ---
+      // /api/refresh -> เติม KV ทันที
       if (url.pathname === "/api/refresh") {
-        // เรียก scheduled logic ซ้ำตรงๆ
-        await this.scheduled(null, env, ctx);
-        const raw = await env.WEATHER_KV.get("bangkok_all");
-        const parsed = raw ? JSON.parse(raw) : null;
+        const apiKey = env.WEATHERAPI_KEY || env.WEATHER_API_KEY;
+        if (!apiKey) {
+          return new Response(JSON.stringify({ status: "error", message: "Missing WEATHERAPI_KEY secret" }), { status: 500, headers: corsHeaders });
+        }
+        const { results, failed, total } = await fetchAllWeather(apiKey);
+        
+        if (results.length > 0) {
+          const payload = {
+            status: "ok",
+            version: "5.3-fixed",
+            total_districts: results.length,
+            failed: failed,
+            updated_at: new Date().toISOString(),
+            data: results
+          };
+          await env.WEATHER_KV.put("bangkok_all", JSON.stringify(payload));
+        }
+
         return new Response(JSON.stringify({ 
-          status: "refreshed", 
-          total: parsed?.total_districts || 0,
-          updated_at: parsed?.updated_at 
+          status: results.length > 0 ? "refreshed" : "failed",
+          total: results.length,
+          failed: failed,
+          attempted: total,
+          districts_loaded: DISTRICTS.length,
+          message: results.length === 0 ? "Check WEATHER_API_KEY or logs" : undefined
         }), { headers: corsHeaders });
       }
 
-      // ดึงก้อนเดียวจาก KV
+      // /api/debug -> ดูว่า DISTRICTS โหลดได้ไหม + API KEY มีไหม
+      if (url.pathname === "/api/debug") {
+        return new Response(JSON.stringify({
+          districts_in_code: DISTRICTS.length,
+          has_weather_key: !!(env.WEATHERAPI_KEY || env.WEATHER_API_KEY),
+          has_mobile_key: !!env.MOBILE_API_KEY,
+          has_kv: !!env.WEATHER_KV,
+          first_district: DISTRICTS[0] || null
+        }), { headers: corsHeaders });
+      }
+
       const raw = await env.WEATHER_KV.get("bangkok_all");
       if (!raw) {
-        return new Response(JSON.stringify({ status: "warming_up", message: "KV empty, waiting for first cron. Call /api/refresh to fill now." }), { status: 503, headers: corsHeaders });
+        return new Response(JSON.stringify({ status: "warming_up", message: "KV empty. Call /api/refresh or check /api/debug" }), { status: 503, headers: corsHeaders });
       }
       const allPayload = JSON.parse(raw);
 
-      // --- ROUTE 1: GET /api/bangkok/all -> ส่ง 50 เขต ---
       if (url.pathname === "/api/bangkok/all") {
         const response = new Response(raw, { headers: corsHeaders });
         ctx.waitUntil(cache.put(cacheKey, response.clone()));
         return response;
       }
 
-      // --- ROUTE 2: GET /api/districts -> ส่งแค่รายชื่อเขตให้ Dropdown เบาๆ ---
       if (url.pathname === "/api/districts") {
         const list = allPayload.data.map(d => ({ id: d.id, name_th: d.name_th, name_en: d.name_en }));
         const response = new Response(JSON.stringify({ total: list.length, districts: list }), { headers: corsHeaders });
@@ -116,20 +170,15 @@ export default {
         return response;
       }
 
-      // --- ROUTE 3: GET /api/weather?district=lat_krabang ---
       if (url.pathname === "/api/weather") {
         const districtId = url.searchParams.get("district");
-
         if (!districtId) {
-          return new Response(JSON.stringify({ error: "missing district param, e.g. ?district=lat_krabang" }), { status: 400, headers: corsHeaders });
+          return new Response(JSON.stringify({ error: "missing district param" }), { status: 400, headers: corsHeaders });
         }
-
         const found = allPayload.data.find(d => d.id === districtId.toLowerCase());
-
         if (!found) {
-          return new Response(JSON.stringify({ error: `district '${districtId}' not found`, available: allPayload.data.map(d => d.id) }), { status: 404, headers: corsHeaders });
+          return new Response(JSON.stringify({ error: `district '${districtId}' not found` }), { status: 404, headers: corsHeaders });
         }
-
         const singleResponse = {
           status: "ok",
           district: found.id,
@@ -138,15 +187,13 @@ export default {
           current: found.current,
           forecast: found.forecast
         };
-
         const response = new Response(JSON.stringify(singleResponse), { headers: corsHeaders });
         response.headers.set("Cache-Control", "public, max-age=1800");
         ctx.waitUntil(cache.put(cacheKey, response.clone()));
         return response;
       }
 
-      // Health check
-      return new Response(JSON.stringify({ status: "ok", version: "5.2-dynamic-filter-final", total_districts: allPayload.total_districts, updated_at: allPayload.updated_at }), { headers: corsHeaders });
+      return new Response(JSON.stringify({ status: "ok", version: "5.3-fixed", total_districts: allPayload.total_districts, updated_at: allPayload.updated_at }), { headers: corsHeaders });
 
     } catch (e) {
       return new Response(JSON.stringify({ status: "error", message: e.message }), { status: 500, headers: corsHeaders });
