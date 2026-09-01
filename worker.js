@@ -4,7 +4,8 @@
  * - caches.default TTL 30 นาที -> Read แทบเป็น 0
  */
 
-import DISTRICTS from './districts.js';
+import * as districtsModule from './districts.js';
+const DISTRICTS = districtsModule.default || districtsModule.DISTRICTS || districtsModule.districts || districtsModule.BANGKOK_DISTRICTS || [];
 
 export default {
   // 1. Cron ทุก 30 นาที - ไปยิง weatherapi.com 50 เขต แล้วเก็บก้อนเดียว
